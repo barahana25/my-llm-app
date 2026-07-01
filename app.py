@@ -5,3 +5,5 @@ import os
 # Streamlit Cloud: st.secrets
 openai_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 os.environ["OPENAI_API_KEY"] = openai_key
+
+st.title("My LLM App")
