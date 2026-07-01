@@ -1,207 +1,240 @@
 """
-infer_openvino.py  ─  [수업 1단계] Streamlit UI 없이 OpenVINO 모델로 추론하기
-════════════════════════════════════════════════════════════════════════
-이 코드는 웹 UI 없이 "모델 로드 → 추론 → 결과 확인" 흐름만 담은 기본 코드다.
-먼저 이 코드로 핵심 로직을 이해한 뒤, 다음 단계에서 Streamlit UI를 입힌다.
-
-[전체 흐름]
-  1. 모델 로드    : ov.Core() → read_model(.xml) → compile_model("CPU")
-  2. 이미지 준비  : 테스트 이미지 파일  또는  웹캠 촬영
-  3. 전처리       : PIL → numpy → VGG16 정규화 (RGB→BGR, 평균값 빼기)
-  4. 추론         : compiled_model(arr)  → sigmoid 단일 확률값
-  5. 결과 확인    : 정상 / 불량 + 확률  (콘솔 출력 + 이미지 표시)
-
-[입력 방식 전환]
-  아래 INPUT_MODE 값만 바꿔서 실행한다.
-    "image"  → TEST_IMAGE_PATH 의 테스트 이미지로 추론
-    "webcam" → 웹캠을 켜고 SPACE 키로 촬영한 이미지로 추론
-
-[필요 패키지]
-  pip install openvino pillow numpy matplotlib opencv-python
-  ※ 웹캠 모드는 opencv-python 필요 (headless 버전은 창 표시 불가)
-  ※ leather_model.xml 과 leather_model.bin 은 같은 폴더에 함께 있어야 한다.
+tf_App_keras.py  ─  .keras 모델 사용
+변경 사항:
+  - build_model_architecture() 완전 제거
+  - load_model() 에서 keras.models.load_model() 한 줄로 구조+가중치 동시 로드
+  - cam_model: Sequential 구조 대응 (vgg16 서브모델 경유)
+  - 실시간 웹캠 제거 (streamlit-webrtc 패키지 의존성 문제)
+  - 입력: 파일 업로드 / 카메라 스냅샷 (st.camera_input 기본 내장)
 """
 
-import os
+import streamlit as st
 import numpy as np
-from PIL import Image
+import os
 import matplotlib
 import matplotlib.pyplot as plt
-import openvino as ov
+import matplotlib.patches as mpatches
+from matplotlib import font_manager
+from PIL import Image
+import tensorflow as tf
+from tensorflow import keras
 
-# ── 설정 ─────────────────────────────────────────────────────────
-INPUT_MODE      = "image"                        # "image" 또는 "webcam"
-MODEL_XML       = "./weights/leather_model.xml"   # .bin 은 같은 이름으로 자동 탐색
-TEST_IMAGE_PATH = "./test_images/sample.jpg"      # 테스트 이미지 경로
-INPUT_IMG_SIZE  = (224, 224)
-CLASSES         = ["정상", "불량"]
+# ── 한글 폰트 설정 ──
+font_path_win   = "C:/Windows/Fonts/malgun.ttf"
+font_path_linux = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
+if os.path.exists(font_path_win):
+    font_manager.fontManager.addfont(font_path_win)
+    matplotlib.rc('font', family='Malgun Gothic')
+elif os.path.exists(font_path_linux):
+    font_manager.fontManager.addfont(font_path_linux)
+    matplotlib.rc('font', family='NanumGothic')
+else:
+    matplotlib.rc('font', family='DejaVu Sans')
+matplotlib.rcParams['axes.unicode_minus'] = False
 
-# 한글 폰트 (matplotlib 그래프 제목 깨짐 방지)
-for _fp, _fam in [("C:/Windows/Fonts/malgun.ttf", "Malgun Gothic"),
-                  ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", "NanumGothic")]:
-    if os.path.exists(_fp):
-        matplotlib.rc("font", family=_fam)
-        break
-matplotlib.rcParams["axes.unicode_minus"] = False
+# ── 상수 ──
+INPUT_IMG_SIZE = (224, 224)
+NEG_CLASS      = 1
+CLASSES        = ["정상", "불량"]
+MODEL_PATH     = "./weights/leather_model.keras"   # ← .keras 사용
+HEATMAP_THRES  = 0.5
 
+# ─────────────────────────────────────────────
+# 1. 페이지 설정
+# ─────────────────────────────────────────────
+st.set_page_config(page_title="InspectorsAlly", page_icon=":camera:", layout="wide")
+st.title("InspectorsAlly")
+st.caption("AI 기반 자동 검사로 품질 관리를 한 단계 높이세요")
+st.write("제품 이미지를 업로드하면 AI 모델이 **정상 / 불량** 여부를 자동으로 판별합니다.")
 
-# ─────────────────────────────────────────────────────────────────
-# 1. 모델 로드
-#    ov.Core()       : OpenVINO 런타임 초기화
-#    read_model()    : .xml(구조) + .bin(가중치) 읽기
-#    compile_model() : CPU 추론 엔진으로 컴파일
-# ─────────────────────────────────────────────────────────────────
-def load_model():
-    if not os.path.exists(MODEL_XML):
-        raise FileNotFoundError(f"모델 파일이 없습니다: {MODEL_XML}")
-    core     = ov.Core()
-    model    = core.read_model(MODEL_XML)
-    compiled = core.compile_model(model, "CPU")
-    print(f"[1] 모델 로드 완료 → {MODEL_XML}")
-    return compiled
-
-
-# ─────────────────────────────────────────────────────────────────
-# 2. 이미지 전처리
-#    VGG16 학습 때 쓴 전처리와 동일하게 맞춰야 예측이 정확하다.
-#    ① RGB 변환 + 224×224 리사이즈
-#    ② RGB → BGR 채널 순서 변환 (VGG16은 BGR 입력)
-#    ③ ImageNet BGR 평균값 빼기 (B:103.94 / G:116.78 / R:123.68)
-#    ④ 배치 차원 추가 (224,224,3) → (1,224,224,3)
-# ─────────────────────────────────────────────────────────────────
-def preprocess(pil_img):
-    img = pil_img.convert("RGB").resize(INPUT_IMG_SIZE)
-    arr = np.array(img, dtype=np.float32)
-
-    arr = arr[:, :, ::-1]        # RGB → BGR
-    arr[:, :, 0] -= 103.94       # B 채널 평균 빼기
-    arr[:, :, 1] -= 116.78       # G 채널 평균 빼기
-    arr[:, :, 2] -= 123.68       # R 채널 평균 빼기
-
-    return np.expand_dims(arr, axis=0)
-
-
-# ─────────────────────────────────────────────────────────────────
-# 3. 추론
-#    compiled_model(arr) → OVDict, [0]으로 출력 접근 (shape (1,1))
-#    출력은 sigmoid 단일값 → 0에 가까우면 정상, 1에 가까우면 불량
-# ─────────────────────────────────────────────────────────────────
-def predict(compiled_model, pil_img):
-    arr   = preprocess(pil_img)
-    prob  = float(compiled_model(arr)[0][0][0])
-    label = CLASSES[1 if prob > 0.5 else 0]
-    return label, prob
-
-
-# ─────────────────────────────────────────────────────────────────
-# 4. 결과 확인 (콘솔 출력 + 이미지 표시)
-# ─────────────────────────────────────────────────────────────────
-# def show_result(pil_img, label, prob):
-#     print("─" * 40)
-#     print(f"  예측 결과 : {label}")
-#     print(f"  불량 확률 : {prob:.1%}")
-#     print(f"  정상 확률 : {(1 - prob):.1%}")
-#     print("─" * 40)
-
-#     plt.figure(figsize=(4, 4))
-#     plt.imshow(pil_img.resize(INPUT_IMG_SIZE))
-#     color = "red" if label == "불량" else "green"
-#     plt.title(f"{label}  (불량 확률: {prob:.1%})", color=color, fontsize=12)
-#     plt.axis("off")
-#     plt.tight_layout()
-#     plt.show()
-import streamlit as st  # 맨 위에 없다면 추가해 주세요
-
-def show_result(pil_img, label, prob):
-    # 1. 텍스트 결과 출력
-    st.subheader("🔮 추론 결과")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if label == "불량":
-            st.error(f"예측 결과 : **{label}**")
-        else:
-            st.success(f"예측 결과 : **{label}**")
-            
-    with col2:
-        st.metric(label="불량 확률", value=f"{prob:.1%}")
-        st.metric(label="정상 확률", value=f"{(1 - prob):.1%}")
-    
+with st.sidebar:
+    if os.path.exists("./docs/overview_dataset.jpg"):
+        st.image(Image.open("./docs/overview_dataset.jpg"))
+    st.subheader("InspectorsAlly 소개")
+    st.write(
+        "InspectorsAlly는 기업의 품질 관리 검사를 효율화하기 위해 설계된 "
+        "AI 기반 검사 애플리케이션입니다. VGG16 전이학습 기반으로 "
+        "가죽 제품의 스크래치, 찍힘, 변색 등의 결함을 감지합니다."
+    )
     st.divider()
-    
-    # 2. matplotlib 대신 st.image로 깔끔하게 이미지 표시
-    st.image(pil_img.resize(INPUT_IMG_SIZE), caption=f"분석된 이미지 ({label})", use_container_width=True)
-
-# ─────────────────────────────────────────────────────────────────
-# 5. 이미지 입력 : 테스트 이미지 파일 / 웹캠 촬영
-# ─────────────────────────────────────────────────────────────────
-def get_image_from_file():
-    if not os.path.exists(TEST_IMAGE_PATH):
-        raise FileNotFoundError(f"테스트 이미지가 없습니다: {TEST_IMAGE_PATH}")
-    print(f"[2] 테스트 이미지 불러오기 → {TEST_IMAGE_PATH}")
-    return Image.open(TEST_IMAGE_PATH).convert("RGB")
+    st.write("**모델 정보**")
+    st.write(f"- 프레임워크: TensorFlow {tf.__version__}")
+    st.write(f"- 백본: VGG16 (ImageNet 사전학습, 전체 동결)")
+    st.write(f"- 출력: sigmoid 단일값 (0=정상, 1=불량)")
+    st.write(f"- 입력 크기: {INPUT_IMG_SIZE[0]}×{INPUT_IMG_SIZE[1]}")
 
 
-def get_image_from_webcam():
-    import cv2  # 웹캠 모드에서만 필요하므로 여기서 import
+# ─────────────────────────────────────────────
+# 2. 모델 로드  ← build_model_architecture() 제거됨
+#    .keras 는 구조+가중치가 함께 저장되어 있으므로
+#    load_model() 한 줄로 복원
+#
+#    ※ Sequential(vgg16 포함) 구조이므로
+#      model.input 대신 vgg16 서브모델을 통해 cam_model 재구성
+# ─────────────────────────────────────────────
+@st.cache_resource
+def load_model():
+    if not os.path.exists(MODEL_PATH):
+        return None, None
 
-    win_name = "webcam  (SPACE: capture / ESC: cancel)"
-    cap      = cv2.VideoCapture(0)
-    captured = None
-    try:
-        if not cap.isOpened():
-            raise RuntimeError("웹캠을 열 수 없습니다. 카메라 연결을 확인하세요.")
+    # 구조 + 가중치 한 번에 로드
+    model = tf.keras.models.load_model(MODEL_PATH)
 
-        print("[2] 웹캠 실행 →  SPACE = 촬영,  ESC = 취소")
-        cv2.namedWindow(win_name)
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            cv2.imshow(win_name, frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 32:        # SPACE → 촬영
-                captured = frame
-                break
-            if key == 27:        # ESC → 취소
-                break
-            # 창의 X 버튼으로 닫은 경우도 종료 (안 그러면 카메라가 계속 점유됨)
-            if cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) < 1:
-                break
-    finally:
-        # 어떤 경우든(촬영·취소·X버튼·예외) 카메라 장치를 반드시 반환
-        cap.release()
-        cv2.destroyAllWindows()
-        for _ in range(5):       # 일부 OS에서 창이 바로 안 닫히는 문제 보완
-            cv2.waitKey(1)
+    # CAM 히트맵용 cam_model 재구성
+    # Sequential 모델은 model.input 직접 접근 불가 → vgg16 서브모델 경유
+    vgg16       = model.get_layer("vgg16")
+    inputs      = vgg16.input                                   # (None, 224, 224, 3)
+    feature_out = vgg16.get_layer("block5_conv3").output        # (None, 14, 14, 512)
 
-    if captured is None:
-        raise RuntimeError("촬영이 취소되었습니다.")
+    x = vgg16.output                                            # (None, 7, 7, 512)
+    x = model.get_layer("global_average_pooling2d")(x)
+    x = model.get_layer("dense")(x)
+    x = model.get_layer("dropout")(x)
+    predictions = model.get_layer("predictions")(x)             # (None, 1)
 
-    # OpenCV(BGR) → PIL(RGB) 변환
-    rgb = cv2.cvtColor(captured, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(rgb)
+    cam_model = keras.Model(inputs=inputs, outputs=[feature_out, predictions])
+    return model, cam_model
 
 
-# ─────────────────────────────────────────────────────────────────
-# 메인 실행
-# ─────────────────────────────────────────────────────────────────
-def main():
-    compiled_model = load_model()
+# ─────────────────────────────────────────────
+# 3. 이미지 전처리
+# ─────────────────────────────────────────────
+def preprocess_image(pil_img):
+    img       = pil_img.convert("RGB").resize(INPUT_IMG_SIZE)
+    img_array = np.array(img, dtype=np.float32)
+    img_array = keras.applications.vgg16.preprocess_input(img_array)
+    return np.expand_dims(img_array, axis=0)
 
-    if INPUT_MODE == "image":
-        pil_img = get_image_from_file()
-    elif INPUT_MODE == "webcam":
-        pil_img = get_image_from_webcam()
+
+# ─────────────────────────────────────────────
+# 4. CAM 히트맵 생성
+# ─────────────────────────────────────────────
+def generate_heatmap(cam_model, img_array):
+    feature_maps, pred = cam_model(img_array, training=False)
+    feature_maps = feature_maps.numpy()[0]
+    prob         = float(pred.numpy()[0][0])
+    class_idx    = 1 if prob > 0.5 else 0
+
+    w1 = cam_model.get_layer("dense").get_weights()[0]
+    w2 = cam_model.get_layer("predictions").get_weights()[0]
+    weights_for_anomaly = (w1 @ w2).squeeze()
+
+    cam     = np.dot(feature_maps, weights_for_anomaly)
+    cam_min, cam_max = cam.min(), cam.max()
+    norm_cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
+
+    heatmap_pil     = Image.fromarray((norm_cam * 255).astype(np.uint8))
+    heatmap_resized = np.array(heatmap_pil.resize(INPUT_IMG_SIZE)) / 255.0
+    return heatmap_resized, prob, class_idx
+
+
+def get_bbox_from_heatmap(heatmap, thres=0.5):
+    binary_map = heatmap > thres
+    if not binary_map.any():
+        return None
+    x_dim  = np.max(binary_map, axis=0) * np.arange(binary_map.shape[1])
+    y_dim  = np.max(binary_map, axis=1) * np.arange(binary_map.shape[0])
+    x_vals = x_dim[x_dim > 0]
+    y_vals = y_dim[y_dim > 0]
+    if len(x_vals) == 0 or len(y_vals) == 0:
+        return None
+    return int(x_vals.min()), int(y_vals.min()), int(x_dim.max()), int(y_dim.max())
+
+
+# ─────────────────────────────────────────────
+# 5. 결과 시각화
+# ─────────────────────────────────────────────
+def visualize_result(pil_img, heatmap, class_idx, prob, thres=HEATMAP_THRES):
+    img_np = np.array(pil_img.resize(INPUT_IMG_SIZE).convert("RGB"))
+
+    if class_idx == NEG_CLASS:
+        fig, axes = plt.subplots(1, 2, figsize=(7, 3))
+        axes[0].imshow(img_np)
+        axes[0].set_title("원본 이미지", fontsize=11)
+        axes[0].axis("off")
+        axes[1].imshow(img_np)
+        axes[1].imshow(heatmap, cmap="Reds", alpha=0.45)
+        axes[1].set_title(f"불량 감지 히트맵 (불량 확률: {prob:.3f})", fontsize=11)
+        axes[1].axis("off")
+        bbox = get_bbox_from_heatmap(heatmap, thres)
+        if bbox:
+            x0, y0, x1, y1 = bbox
+            rect = mpatches.Rectangle(
+                (x0, y0), x1-x0, y1-y0, linewidth=2, edgecolor="red", facecolor="none"
+            )
+            axes[1].add_patch(rect)
+        plt.tight_layout()
+        st.pyplot(fig, use_container_width=False)
+        plt.close(fig)
     else:
-        raise ValueError("INPUT_MODE 는 'image' 또는 'webcam' 이어야 합니다.")
+        fig, ax = plt.subplots(figsize=(4, 3))
+        ax.imshow(img_np)
+        ax.set_title(f"정상 (불량 확률: {prob:.3f})", fontsize=11)
+        ax.axis("off")
+        plt.tight_layout()
+        st.pyplot(fig, use_container_width=False)
+        plt.close(fig)
 
-    print("[3] 추론 중...")
-    label, prob = predict(compiled_model, pil_img)
 
-    print("[4] 결과 확인")
-    show_result(pil_img, label, prob)
+# ─────────────────────────────────────────────
+# 6. 메인 UI
+# ─────────────────────────────────────────────
+model, cam_model = load_model()
 
+if model is None:
+    st.error(
+        f"모델 파일을 찾을 수 없습니다: `{MODEL_PATH}`\n\n"
+        "노트북에서 아래 코드로 저장하세요:\n\n"
+        "```python\nmodel.save('weights/leather_model.keras')\n```"
+    )
+    st.stop()
 
-if __name__ == "__main__":
-    main()
+st.subheader("이미지 입력 방법 선택")
+input_method = st.radio("options", ["파일 업로드", "카메라 촬영"],
+                        label_visibility="collapsed")
+pil_image = None
+
+if input_method == "파일 업로드":
+    uploaded_file = st.file_uploader("이미지 파일을 선택하세요", type=["jpg","jpeg","png"])
+    if uploaded_file:
+        pil_image = Image.open(uploaded_file).convert("RGB")
+        st.image(pil_image, caption="업로드된 이미지", width=300)
+        st.success("이미지가 성공적으로 업로드되었습니다!")
+    else:
+        st.warning("검사할 이미지 파일을 업로드해주세요.")
+
+elif input_method == "카메라 촬영":
+    st.warning("카메라 접근 권한을 허용해주세요.")
+    camera_file = st.camera_input("카메라로 이미지 촬영")
+    if camera_file:
+        pil_image = Image.open(camera_file).convert("RGB")
+        st.image(pil_image, caption="촬영된 이미지", width=300)
+        st.success("이미지가 성공적으로 촬영되었습니다!")
+    else:
+        st.warning("카메라로 이미지를 촬영해주세요.")
+
+submit = st.button(label="가죽 제품 이미지 검사 시작", type="primary")
+
+if submit:
+    if pil_image is None:
+        st.error("이미지를 먼저 업로드하거나 카메라로 촬영해주세요.")
+    else:
+        st.subheader("검사 결과")
+        with st.spinner("이미지를 분석 중입니다..."):
+            img_array                = preprocess_image(pil_image)
+            heatmap, prob, class_idx = generate_heatmap(cam_model, img_array)
+        label = CLASSES[class_idx]
+        if label == "정상":
+            st.success(f"✅ **정상** (불량 확률: {prob:.1%})\n\n제품 검사 결과 이상이 감지되지 않았습니다.")
+        else:
+            st.error(
+                f"⚠️ **불량 감지** (불량 확률: {prob:.1%})\n\n"
+                "아래 히트맵에서 결함이 의심되는 영역(빨간 박스)을 확인하세요."
+            )
+        st.write("**검사 결과 시각화**")
+        visualize_result(pil_image, heatmap, class_idx, prob)
+        st.write("**클래스별 예측 확률**")
+        col1, col2 = st.columns(2)
+        col1.metric("정상", f"{(1 - prob):.1%}")
+        col2.metric("불량", f"{prob:.1%}")
+        st.progress(float(prob), text=f"불량 확률: {prob:.1%}")
