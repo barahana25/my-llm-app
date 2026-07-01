@@ -96,21 +96,41 @@ def predict(compiled_model, pil_img):
 # ─────────────────────────────────────────────────────────────────
 # 4. 결과 확인 (콘솔 출력 + 이미지 표시)
 # ─────────────────────────────────────────────────────────────────
+# def show_result(pil_img, label, prob):
+#     print("─" * 40)
+#     print(f"  예측 결과 : {label}")
+#     print(f"  불량 확률 : {prob:.1%}")
+#     print(f"  정상 확률 : {(1 - prob):.1%}")
+#     print("─" * 40)
+
+#     plt.figure(figsize=(4, 4))
+#     plt.imshow(pil_img.resize(INPUT_IMG_SIZE))
+#     color = "red" if label == "불량" else "green"
+#     plt.title(f"{label}  (불량 확률: {prob:.1%})", color=color, fontsize=12)
+#     plt.axis("off")
+#     plt.tight_layout()
+#     plt.show()
+import streamlit as st  # 맨 위에 없다면 추가해 주세요
+
 def show_result(pil_img, label, prob):
-    print("─" * 40)
-    print(f"  예측 결과 : {label}")
-    print(f"  불량 확률 : {prob:.1%}")
-    print(f"  정상 확률 : {(1 - prob):.1%}")
-    print("─" * 40)
-
-    plt.figure(figsize=(4, 4))
-    plt.imshow(pil_img.resize(INPUT_IMG_SIZE))
-    color = "red" if label == "불량" else "green"
-    plt.title(f"{label}  (불량 확률: {prob:.1%})", color=color, fontsize=12)
-    plt.axis("off")
-    plt.tight_layout()
-    plt.show()
-
+    # 1. 텍스트 결과 출력
+    st.subheader("🔮 추론 결과")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if label == "불량":
+            st.error(f"예측 결과 : **{label}**")
+        else:
+            st.success(f"예측 결과 : **{label}**")
+            
+    with col2:
+        st.metric(label="불량 확률", value=f"{prob:.1%}")
+        st.metric(label="정상 확률", value=f"{(1 - prob):.1%}")
+    
+    st.divider()
+    
+    # 2. matplotlib 대신 st.image로 깔끔하게 이미지 표시
+    st.image(pil_img.resize(INPUT_IMG_SIZE), caption=f"분석된 이미지 ({label})", use_container_width=True)
 
 # ─────────────────────────────────────────────────────────────────
 # 5. 이미지 입력 : 테스트 이미지 파일 / 웹캠 촬영
