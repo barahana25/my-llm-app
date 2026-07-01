@@ -1,30 +1,25 @@
-langchain==0.3.0
-langchain-openai==0.3.0
-langchain-community==0.3.0
-langchain-chroma==0.2.0
-langchain-text-splitters==0.3.0
-openai==1.60.0
-chromadb==0.5.0
-streamlit==1.32.0
-pypdf==4.3.0
-python-dotenv==1.0.1
+langchain
+langchain-openai
+langchain-community
+langchain-chroma
+langchain-text-splitters
+openai
+chromadb
+streamlit>=1.38.0
+pypdf
+python-dotenv
 
-# 💡 아래 OpenVINO 및 이미지 처리 패키지 추가
+# OpenVINO 및 이미지 처리 관련
 openvino
 pillow
 numpy
 matplotlib
 opencv-python-headless
 
-matplotlib==3.9.2
-numpy==1.26.4
-opencv-python-headless==4.10.0.84
-pandas==2.2.3
-pillow==10.4.0
-plotly==5.24.1
-scikit-learn==1.5.2
-scipy==1.14.1
-seaborn==0.13.2
-streamlit==1.38.0
-tensorflow==2.17.0
-urllib3==2.2.3
+# 💡 새로 발생한 tensorflow 및 추가 패키지 등록
+tensorflow
+pandas
+plotly
+scikit-learn
+scipy
+seaborn
