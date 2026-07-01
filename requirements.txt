@@ -8,3 +8,10 @@ chromadb==0.5.0
 streamlit==1.32.0
 pypdf==4.3.0
 python-dotenv==1.0.1
+
+# 💡 아래 OpenVINO 및 이미지 처리 패키지 추가
+openvino
+pillow
+numpy
+matplotlib
+opencv-python-headless
