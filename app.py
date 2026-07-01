@@ -150,11 +150,11 @@ def visualize_result(pil_img, heatmap, class_idx, prob, thres=HEATMAP_THRES):
     if class_idx == NEG_CLASS:
         fig, axes = plt.subplots(1, 2, figsize=(7, 3))
         axes[0].imshow(img_np)
-        axes[0].set_title("원본 이미지", fontsize=11)
+        axes[0].set_title("original image", fontsize=11)
         axes[0].axis("off")
         axes[1].imshow(img_np)
         axes[1].imshow(heatmap, cmap="Reds", alpha=0.45)
-        axes[1].set_title(f"불량 감지 히트맵 (불량 확률: {prob:.3f})", fontsize=11)
+        axes[1].set_title(f"anomaly detection heatmap (anomaly probability: {prob:.3f})", fontsize=11)
         axes[1].axis("off")
         bbox = get_bbox_from_heatmap(heatmap, thres)
         if bbox:
